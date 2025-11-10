@@ -3,17 +3,13 @@
 ;******************************************************************************************
 ; Proyecto final de curso - Flowlang
 ; Integrantes:
-; [Juan Felipe Palechor 2270963]
-; [Juan Esteban Rodriguez 2042282]
-; [Juan Pablo Charry 2040579]
+; [Juan Felipe Palechor - 2270963]
+; [Juan Esteban Rodriguez - 2042282]
+; [Juan Pablo Charry - 2040579]
 ; Curso: Fundamentos de Lenguajes de Programación
 ; Profesor: Robinson Duque
 ; URL del repositorio: https://github.com/jpcharryr2077/proyecto-final-flp.git
 ;******************************************************************************************
-
-; =============================================
-; Commit 3: FlowLang - AMBIENTE CORREGIDO (con fixes)
-; =============================================
 
 ; Scanner 
 (define scanner-spec-flowlang
@@ -58,6 +54,18 @@
     (expression ("if" expression "then" expression "else" expression "end") if-exp)
     (expression ("begin" (separated-list expression ";") "end") begin-exp)
 
+    ; Listas 
+    (expression ("[" (separated-list expression ",") "]") list-lit-exp)
+    (expression ("vacio") list-empty-exp)
+    (expression ("crear-lista" "(" expression "," expression ")") crear-lista-exp)
+    (expression ("cabeza" "(" expression ")") cabeza-exp)
+    (expression ("cola" "(" expression ")") cola-exp)
+    (expression ("append" "(" expression "," expression ")") append-exp)
+    (expression ("ref-list" "(" expression "," expression ")") ref-list-exp)
+    (expression ("set-list" "(" expression "," expression "," expression ")") set-list-exp)
+    (expression ("lista?" "(" expression ")") lista?-exp)
+    (expression ("vacio?" "(" expression ")") vacio?-exp)
+
     ; Primitivas binarias
     (primitive-bin ("+")      primitiva-suma)
     (primitive-bin ("-")      primitiva-resta)
@@ -90,8 +98,8 @@
   (str-val  (value string?))
   (null-val)
   (proc-val (value procval?))
-  (list-val (value list?))  
-  (dict-val (value list?))) 
+  (list-val (ref integer?))  
+  (dict-val (value list?)))
 
 (define-datatype procval procval?
   (closure
@@ -183,6 +191,67 @@
 ; Predicado de referencia
 (define reference? (lambda (v) (integer? v)))
 
+; ===== Helpers de listas =====
+(define make-list-expval-from-elements
+  (lambda (vals) 
+    (let* ([vec (list->vector vals)]
+           [ref (newref vec)])
+      (list-val ref))))
+
+(define list-length
+  (lambda (lv)
+    (let* ([ref (expval->list-ref lv)]
+           [vec (deref ref)])
+      (vector-length vec))))
+
+(define list-ref0
+  (lambda (lv i)
+    (let* ([ref (expval->list-ref lv)]
+           [vec (deref ref)])
+      (if (and (integer? i) (<= 0 i) (< i (vector-length vec)))
+          (vector-ref vec i)
+          (eopl:error 'ref-list "Índice fuera de rango: ~s" i)))))
+
+(define list-set0!
+  (lambda (lv i val)
+    (let* ([ref (expval->list-ref lv)]
+           [vec (deref ref)])
+      (if (and (integer? i) (<= 0 i) (< i (vector-length vec)))
+          (begin (vector-set! vec i val)
+                 lv) 
+          (eopl:error 'set-list "Índice fuera de rango: ~s" i)))))
+
+(define list-cons-new
+  (lambda (head tail) 
+    (let* ([ref2 (expval->list-ref tail)]
+           [vec2 (deref ref2)]
+           [n (vector-length vec2)]
+           [vec (make-vector (+ n 1))])
+      (vector-set! vec 0 head)
+      (let loop ([i 0])
+        (when (< i n)
+          (vector-set! vec (+ i 1) (vector-ref vec2 i))
+          (loop (+ i 1))))
+      (list-val (newref vec)))))
+
+(define list-append-new
+  (lambda (l1 l2)
+    (let* ([r1 (expval->list-ref l1)] [v1 (deref r1)] [n1 (vector-length v1)]
+           [r2 (expval->list-ref l2)] [v2 (deref r2)] [n2 (vector-length v2)]
+           [vec (make-vector (+ n1 n2))])
+      (let loop ([i 0])
+        (when (< i n1)
+          (vector-set! vec i (vector-ref v1 i))
+          (loop (+ i 1))))
+      (let loop2 ([i 0])
+        (when (< i n2)
+          (vector-set! vec (+ n1 i) (vector-ref v2 i))
+          (loop2 (+ i 1))))
+      (list-val (newref vec)))))
+
+
+
+
 ; =============================================
 ; Evaluador 
 ; =============================================
@@ -214,9 +283,7 @@
                   (let* ([args   (eval-rands (car calls) e)]
                          [result (apply-procedure closure-val args)])
                     (loop result (cdr calls) e)))
-                (else (eopl:error 'app-or-var-exp "Not a procedure: ~s" val)))))))
-)
-
+                (else (eopl:error 'app-or-var-exp "Not a procedure: ~s" val))))))))
 
       ; Declaración 
       (var-decl-exp (id val-exp)
@@ -263,6 +330,112 @@
       (func-exp (ids body)
         (cons (proc-val (closure ids body env)) env))
 
+      ; Literal: [e1, e2, ...]
+      (list-lit-exp (elems)
+        (let loop ([xs elems] [e env] [acc '()])
+          (if (null? xs)
+              (cons (make-list-expval-from-elements (reverse acc)) e)
+              (let* ([res (eval-expression (car xs) e)]
+                     [v   (car res)]
+                     [e2  (cdr res)])
+                (loop (cdr xs) e2 (cons v acc))))))
+
+      ; vacio
+      (list-empty-exp ()
+        (let* ([ref (newref (list->vector '()))])
+          (cons (list-val ref) env)))
+
+      ; crear-lista(elem, lista)
+      (crear-lista-exp (elem lst)
+        (let* ([ev (eval-expression elem env)]
+               [v  (car ev)]
+               [e1 (cdr ev)]
+               [lv (eval-expression lst e1)]
+               [l  (car lv)]
+               [e2 (cdr lv)])
+          (if (list-val? l)
+              (cons (list-cons-new v l) e2)
+              (eopl:error 'crear-lista "Segundo argumento no es lista: ~s" l))))
+
+      ; cabeza(lista)
+      (cabeza-exp (lst)
+        (let* ([lv (eval-expression lst env)]
+               [l  (car lv)]
+               [e1 (cdr lv)])
+          (if (list-val? l)
+              (if (> (list-length l) 0)
+                  (cons (list-ref0 l 0) e1)
+                  (eopl:error 'cabeza "Lista vacía"))
+              (eopl:error 'cabeza "No es lista: ~s" l))))
+
+      ; cola(lista) 
+      (cola-exp (lst)
+        (let* ([lv (eval-expression lst env)]
+               [l  (car lv)]
+               [e1 (cdr lv)])
+          (if (list-val? l)
+              (let* ([len (list-length l)])
+                (if (> len 0)
+                    (let* ([ref (expval->list-ref l)]
+                           [vec (deref ref)]
+                           [tail-list (let loop ([i 1] [acc '()])
+                                        (if (>= i len)
+                                            (reverse acc)
+                                            (loop (+ i 1)
+                                                  (cons (vector-ref vec i) acc))))])
+                      (cons (make-list-expval-from-elements tail-list) e1))
+                    (eopl:error 'cola "Lista vacía")))
+              (eopl:error 'cola "No es lista: ~s" l))))
+
+      ; append(lista1, lista2) 
+      (append-exp (l1 l2)
+        (let* ([e1 (eval-expression l1 env)]
+               [lv1 (car e1)] [env1 (cdr e1)]
+               [e2 (eval-expression l2 env1)]
+               [lv2 (car e2)] [env2 (cdr e2)])
+          (if (and (list-val? lv1) (list-val? lv2))
+              (cons (list-append-new lv1 lv2) env2)
+              (eopl:error 'append "Argumentos no son listas: ~s ~s" lv1 lv2))))
+
+      ; ref-list(lista, i)
+      (ref-list-exp (lst ix)
+        (let* ([lres (eval-expression lst env)]
+               [l    (car lres)] [env1 (cdr lres)]
+               [ires (eval-expression ix env1)]
+               [i    (car ires)] [env2 (cdr ires)])
+          (if (and (list-val? l) (num-val? i))
+              (cons (list-ref0 l (expval->num i)) env2)
+              (eopl:error 'ref-list "Tipos: lista y número requeridos: ~s ~s" l i))))
+
+      ; set-list(lista, i, val) 
+      (set-list-exp (lst ix val)
+        (let* ([lres (eval-expression lst env)]
+               [l    (car lres)] [env1 (cdr lres)]
+               [ires (eval-expression ix env1)]
+               [i    (car ires)] [env2 (cdr ires)]
+               [vres (eval-expression val env2)]
+               [v    (car vres)] [env3 (cdr vres)])
+          (if (and (list-val? l) (num-val? i))
+              (cons (list-set0! l (expval->num i) v) env3)
+              (eopl:error 'set-list "Tipos: lista y número requeridos: ~s ~s" l i))))
+
+      ; lista?(x)
+      (lista?-exp (x)
+        (let* ([xr (eval-expression x env)]
+               [v  (car xr)]
+               [e1 (cdr xr)])
+          (cons (bool-val (list-val? v)) e1)))
+
+      ; vacio?(lista)
+      (vacio?-exp (lst)
+        (let* ([lr (eval-expression lst env)]
+               [l  (car lr)]
+               [e1 (cdr lr)])
+          (if (list-val? l)
+              (cons (bool-val (= (list-length l) 0)) e1)
+              (cons (bool-val #f) e1))))
+
+
       ; Binarias
       (primapp-bin-exp (exp1 prim exp2)
         (let* ([e1  (eval-expression exp1 env)]
@@ -282,7 +455,6 @@
 
       (else (eopl:error 'eval-expression "Expression not implemented: ~s" exp)))))
 
-; Evalúa lista de argumentos EN SECUENCIA (izq→der)
 (define eval-rands
   (lambda (rands env)
     (let loop ([es rands] [e env] [acc '()])
@@ -382,6 +554,19 @@
       (str-val (s) s)
       (else (eopl:error 'expval->str "No es un string: ~s" val)))))
 
+(define list-val?
+  (lambda (v)
+    (cases expval v
+      (list-val (r) #t)
+      (else #f))))
+
+(define expval->list-ref
+  (lambda (v)
+    (cases expval v
+      (list-val (r) r)
+      (else (eopl:error 'expval->list-ref "No es lista: ~s" v)))))
+
+
 (define num-val?  (lambda (v) (cases expval v (num-val  (n) #t) (else #f))))
 (define bool-val? (lambda (v) (cases expval v (bool-val (b) #t) (else #f))))
 (define str-val?  (lambda (v) (cases expval v (str-val  (s) #t) (else #f))))
@@ -420,4 +605,33 @@
     (sllgen:make-stream-parser scanner-spec-flowlang grammar-flowlang)))
 
 (start-flowlang-repl)
+
+; ================== PRUEBAS ==================
+
+; 1) cabeza de un literal de lista
+; --> cabeza([10,20,30])
+; Esperado: 10
+
+; 2) cola seguida de cabeza 
+; --> cabeza(cola([10,20,30]))
+; Esperado: 20
+
+; 3) append y acceso por índice 
+; --> ref-list(append([1,2],[3,4]), 3)
+; Esperado: 4
+
+; 4) mutabilidad compartida 
+; --> begin
+;       var a = [7,8];
+;       var b = a;
+;       set-list(a, 1, 99);
+;       ref-list(b, 1)
+;     end
+; Esperado: 99
+
+; 5) crear-lista 
+; --> cabeza(crear-lista(0, [1,2]))
+; Esperado: 0
+
+; ============================================================================
 
