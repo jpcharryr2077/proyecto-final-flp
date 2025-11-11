@@ -66,6 +66,17 @@
     (expression ("lista?" "(" expression ")") lista?-exp)
     (expression ("vacio?" "(" expression ")") vacio?-exp)
 
+     ; Diccionarios
+    (expression ("{" (separated-list dict-entry ",") "}") dict-lit-exp)
+    (dict-entry (identifier ":" expression) dict-entry-pair)
+    (expression ("crear-diccionario" "(" ")") dict-create-exp)
+    (expression ("diccionario?" "(" expression ")") diccionario?-exp)
+    (expression ("ref-diccionario" "(" expression "," expression ")") ref-dict-exp)
+    (expression ("set-diccionario" "(" expression "," expression "," expression ")") set-dict-exp)
+    (expression ("claves" "(" expression ")") claves-exp)
+    (expression ("valores" "(" expression ")") valores-exp)
+
+
     ; Primitivas binarias
     (primitive-bin ("+")      primitiva-suma)
     (primitive-bin ("-")      primitiva-resta)
@@ -99,7 +110,8 @@
   (null-val)
   (proc-val (value procval?))
   (list-val (ref integer?))  
-  (dict-val (value list?)))
+    (dict-val (ref integer?)))   
+
 
 (define-datatype procval procval?
   (closure
@@ -249,7 +261,98 @@
           (loop2 (+ i 1))))
       (list-val (newref vec)))))
 
+; ===== Helpers de diccionarios =====
 
+(define make-dict-empty
+  (lambda ()
+    (dict-val (newref (list->vector '()))))) 
+
+(define make-dict-expval-from-alist
+  (lambda (alist) 
+    (let* ([vec (list->vector alist)]
+           [ref (newref vec)])
+      (dict-val ref))))
+
+(define dict-vector
+  (lambda (dv)
+    (deref (expval->dict-ref dv))))
+
+(define dict-set-vector!
+  (lambda (dv vec)
+    (let* ([ref (expval->dict-ref dv)])
+      (setref! ref vec)
+      dv)))
+
+(define dict-find-index
+  (lambda (vec key)
+    (let loop ([i 0] [n (vector-length vec)])
+      (if (>= i n)
+          #f
+          (let* ([pair (vector-ref vec i)]
+                 [k (car pair)])
+            (if (string=? k key) i (loop (+ i 1) n)))))))
+
+(define ensure-string-key
+  (lambda (v who)
+    (cond
+      [(str-val? v) 
+       (let ([s (expval->str v)])
+         (if (and (> (string-length s) 1) 
+                  (string=? (substring s 0 1) "\"")
+                  (string=? (substring s (- (string-length s) 1)) "\""))
+             (substring s 1 (- (string-length s) 1))
+             s))]
+      [(symbol? v) (symbol->string v)]  
+      [else (eopl:error who "La clave debe ser string, recibido: ~s" v)])))
+
+
+(define dict-ref-key
+  (lambda (dv key-str)
+    (let* ([vec (dict-vector dv)]
+           [idx (dict-find-index vec key-str)])
+      (if (number? idx)
+          (cdr (vector-ref vec idx))
+          (eopl:error 'ref-diccionario "Clave inexistente: ~s" key-str)))))
+
+(define dict-set-key!
+  (lambda (dv key-str val)
+    (let* ([vec (dict-vector dv)]
+           [idx (dict-find-index vec key-str)])
+      (if (number? idx)
+          (begin
+            (let* ([old (vector-ref vec idx)])
+              (vector-set! vec idx (cons (car old) val)))
+            dv)
+          (let* ([n (vector-length vec)]
+                 [vec2 (make-vector (+ n 1))])
+            (let loop ([i 0])
+              (when (< i n)
+                (vector-set! vec2 i (vector-ref vec i))
+                (loop (+ i 1))))
+            (vector-set! vec2 n (cons key-str val))
+            (dict-set-vector! dv vec2))))))
+
+(define dict-keys->list
+  (lambda (dv)
+    (let* ([vec (dict-vector dv)]
+           [n (vector-length vec)])
+      (let loop ([i 0] [acc '()])
+        (if (>= i n)
+            (reverse acc)
+            (let* ([pair (vector-ref vec i)]
+                   [k (car pair)])
+              (loop (+ i 1) (cons (str-val k) acc))))))))
+
+(define dict-values->list
+  (lambda (dv)
+    (let* ([vec (dict-vector dv)]
+           [n (vector-length vec)])
+      (let loop ([i 0] [acc '()])
+        (if (>= i n)
+            (reverse acc)
+            (let* ([pair (vector-ref vec i)]
+                   [v (cdr pair)])
+              (loop (+ i 1) (cons v acc))))))))
 
 
 ; =============================================
@@ -259,33 +362,35 @@
 (define eval-expression
   (lambda (exp env)
     (cases expression exp
+      
       ; Constantes
       (const-num-exp  (datum) (cons (num-val datum) env))
       (const-str-exp  (texto) (cons (str-val texto) env))
       (const-bool-exp (bool)  (cons (bool-val (eq? bool 'true)) env))
       (const-null-exp ()      (cons (null-val) env))
 
-      ; Var o Aplicación 
-     (app-or-var-exp (rator rands-nested)
-  (if (null? rands-nested)
-      (let ([binding (apply-env env rator)])
-        (if (reference? binding)
-            (cons (deref binding) env)    
-            (cons binding env)))          
-      (let* ([proc-env (eval-expression (app-or-var-exp rator '()) env)]
-             [p        (car proc-env)]
-             [cur-env  (cdr proc-env)])
-        (let loop ([val p] [calls rands-nested] [e cur-env])
-          (if (null? calls)
-              (cons val e) 
-              (cases expval val
-                (proc-val (closure-val)
-                  (let* ([args   (eval-rands (car calls) e)]
-                         [result (apply-procedure closure-val args)])
-                    (loop result (cdr calls) e)))
-                (else (eopl:error 'app-or-var-exp "Not a procedure: ~s" val))))))))
+      ; Var o Aplicación
+      (app-or-var-exp (rator rands-nested)
+        (if (null? rands-nested)
+            (let ([binding (apply-env env rator)])
+              (if (reference? binding)
+                  (cons (deref binding) env)
+                  (cons binding env)))
+            (let* ([proc-env (eval-expression (app-or-var-exp rator '()) env)]
+                   [p        (car proc-env)]
+                   [cur-env  (cdr proc-env)])
+              (let loop ([val p] [calls rands-nested] [e cur-env])
+                (if (null? calls)
+                    (cons val e)
+                    (cases expval val
+                      (proc-val (closure-val)
+                        (let* ([args   (eval-rands (car calls) e)]
+                               [result (apply-procedure closure-val args)])
+                          (loop result (cdr calls) e)))
+                      (else (eopl:error 'app-or-var-exp "Not a procedure: ~s" val))))))))
 
-      ; Declaración 
+      
+      ; Declaración y Asignación
       (var-decl-exp (id val-exp)
         (let* ([ve   (eval-expression val-exp env)]
                [val  (car ve)]
@@ -293,7 +398,6 @@
                [ref  (newref val)])
           (cons val (extend-env (list id) (list ref) e1))))
 
-      ; Asignación 
       (assign-exp (id val-exp)
         (let* ([ve   (eval-expression val-exp env)]
                [val  (car ve)]
@@ -305,7 +409,7 @@
               (eopl:error 'assign-exp
                           "Variable not mutable or not a reference: ~s (got ~s)" id ref))))
 
-      ; If
+      ; Control de flujo
       (if-exp (test-exp true-exp false-exp)
         (let* ([te (eval-expression test-exp env)]
                [tv (car te)]
@@ -314,7 +418,6 @@
               (eval-expression true-exp e1)
               (eval-expression false-exp e1))))
 
-      ; Begin secuencial
       (begin-exp (exps)
         (if (null? exps)
             (cons (null-val) env)
@@ -326,11 +429,12 @@
                          [e2 (cdr re)])
                     (loop (cdr xs) e2 rv))))))
 
-      ; Funciones 
+      
+      ; Funciones
       (func-exp (ids body)
         (cons (proc-val (closure ids body env)) env))
 
-      ; Literal: [e1, e2, ...]
+      ; Listas
       (list-lit-exp (elems)
         (let loop ([xs elems] [e env] [acc '()])
           (if (null? xs)
@@ -340,12 +444,10 @@
                      [e2  (cdr res)])
                 (loop (cdr xs) e2 (cons v acc))))))
 
-      ; vacio
       (list-empty-exp ()
         (let* ([ref (newref (list->vector '()))])
           (cons (list-val ref) env)))
 
-      ; crear-lista(elem, lista)
       (crear-lista-exp (elem lst)
         (let* ([ev (eval-expression elem env)]
                [v  (car ev)]
@@ -357,7 +459,6 @@
               (cons (list-cons-new v l) e2)
               (eopl:error 'crear-lista "Segundo argumento no es lista: ~s" l))))
 
-      ; cabeza(lista)
       (cabeza-exp (lst)
         (let* ([lv (eval-expression lst env)]
                [l  (car lv)]
@@ -368,7 +469,6 @@
                   (eopl:error 'cabeza "Lista vacía"))
               (eopl:error 'cabeza "No es lista: ~s" l))))
 
-      ; cola(lista) 
       (cola-exp (lst)
         (let* ([lv (eval-expression lst env)]
                [l  (car lv)]
@@ -387,7 +487,6 @@
                     (eopl:error 'cola "Lista vacía")))
               (eopl:error 'cola "No es lista: ~s" l))))
 
-      ; append(lista1, lista2) 
       (append-exp (l1 l2)
         (let* ([e1 (eval-expression l1 env)]
                [lv1 (car e1)] [env1 (cdr e1)]
@@ -397,7 +496,6 @@
               (cons (list-append-new lv1 lv2) env2)
               (eopl:error 'append "Argumentos no son listas: ~s ~s" lv1 lv2))))
 
-      ; ref-list(lista, i)
       (ref-list-exp (lst ix)
         (let* ([lres (eval-expression lst env)]
                [l    (car lres)] [env1 (cdr lres)]
@@ -407,7 +505,6 @@
               (cons (list-ref0 l (expval->num i)) env2)
               (eopl:error 'ref-list "Tipos: lista y número requeridos: ~s ~s" l i))))
 
-      ; set-list(lista, i, val) 
       (set-list-exp (lst ix val)
         (let* ([lres (eval-expression lst env)]
                [l    (car lres)] [env1 (cdr lres)]
@@ -419,14 +516,12 @@
               (cons (list-set0! l (expval->num i) v) env3)
               (eopl:error 'set-list "Tipos: lista y número requeridos: ~s ~s" l i))))
 
-      ; lista?(x)
       (lista?-exp (x)
         (let* ([xr (eval-expression x env)]
                [v  (car xr)]
                [e1 (cdr xr)])
           (cons (bool-val (list-val? v)) e1)))
 
-      ; vacio?(lista)
       (vacio?-exp (lst)
         (let* ([lr (eval-expression lst env)]
                [l  (car lr)]
@@ -435,8 +530,66 @@
               (cons (bool-val (= (list-length l) 0)) e1)
               (cons (bool-val #f) e1))))
 
+      ; Diccionarios
+      (dict-lit-exp (entries)
+        (let loop ([es entries] [e env] [acc '()])
+          (if (null? es)
+              (cons (make-dict-expval-from-alist (reverse acc)) e)
+              (cases dict-entry (car es)
+                (dict-entry-pair (id exp)
+                  (let* ([res (eval-expression exp e)]
+                         [v   (car res)]
+                         [e2  (cdr res)]
+                         [k   (symbol->string id)])
+                    (loop (cdr es) e2 (cons (cons k v) acc))))))))
 
-      ; Binarias
+      (dict-create-exp ()
+        (cons (make-dict-empty) env))
+
+      (diccionario?-exp (x)
+        (let* ([xr (eval-expression x env)]
+               [v  (car xr)]
+               [e1 (cdr xr)])
+          (cons (bool-val (dict-val? v)) e1)))
+
+     (ref-dict-exp (d k)
+  (let* ([dr (eval-expression d env)]              
+         [dv (car dr)] [e1 (cdr dr)]                
+         [kr (eval-expression k e1)]                
+         [kv (car kr)] [e2 (cdr kr)]                
+         [key (ensure-string-key kv 'ref-diccionario)])  
+    (if (dict-val? dv)
+        (cons (dict-ref-key dv key) e2)  
+        (eopl:error 'ref-diccionario "No es diccionario: ~s" dv))))
+
+      (set-dict-exp (d k vexp)
+  (let* ([dr (eval-expression d env)]               
+         [dv (car dr)] [e1 (cdr dr)]                 
+         [kr (eval-expression k e1)]                 
+         [kv (car kr)] [e2 (cdr kr)]                 
+         [vr (eval-expression vexp e2)]              
+         [vv (car vr)] [e3 (cdr vr)]                 
+         [key (ensure-string-key kv 'set-diccionario)])  
+    (if (dict-val? dv)
+        (begin (dict-set-key! dv key vv) (cons dv e3))  
+        (eopl:error 'set-diccionario "No es diccionario: ~s" dv))))
+
+      (claves-exp (d)
+        (let* ([dr (eval-expression d env)]
+               [dv (car dr)] [e1 (cdr dr)])
+          (if (dict-val? dv)
+              (cons (make-list-expval-from-elements (dict-keys->list dv)) e1)
+              (eopl:error 'claves "No es diccionario: ~s" dv))))
+
+      (valores-exp (d)
+        (let* ([dr (eval-expression d env)]
+               [dv (car dr)] [e1 (cdr dr)])
+          (if (dict-val? dv)
+              (cons (make-list-expval-from-elements (dict-values->list dv)) e1)
+              (eopl:error 'valores "No es diccionario: ~s" dv))))
+
+     
+      ; Operaciones primitivas
       (primapp-bin-exp (exp1 prim exp2)
         (let* ([e1  (eval-expression exp1 env)]
                [v1  (car e1)]
@@ -446,12 +599,11 @@
                [env2 (cdr e2)])
           (cons (apply-prim-binaria prim v1 v2) env2)))
 
-      ; Unarias
       (primapp-un-exp (prim exp1)
         (let* ([e1 (eval-expression exp1 env)]
                [v1 (car e1)]
-               [e2 (cdr e1)])
-          (cons (apply-primitiva-unaria prim v1) e2)))
+               [env1 (cdr e1)])
+          (cons (apply-primitiva-unaria prim v1) env1)))
 
       (else (eopl:error 'eval-expression "Expression not implemented: ~s" exp)))))
 
@@ -566,6 +718,17 @@
       (list-val (r) r)
       (else (eopl:error 'expval->list-ref "No es lista: ~s" v)))))
 
+(define dict-val?
+  (lambda (v)
+    (cases expval v
+      (dict-val (r) #t)
+      (else #f))))
+
+(define expval->dict-ref
+  (lambda (v)
+    (cases expval v
+      (dict-val (r) r)
+      (else (eopl:error 'expval->dict-ref "No es diccionario: ~s" v)))))
 
 (define num-val?  (lambda (v) (cases expval v (num-val  (n) #t) (else #f))))
 (define bool-val? (lambda (v) (cases expval v (bool-val (b) #t) (else #f))))
@@ -606,7 +769,7 @@
 
 (start-flowlang-repl)
 
-; ================== PRUEBAS ==================
+; ================== Pruebas --> Listas ==================
 
 ; 1) cabeza de un literal de lista
 ; --> cabeza([10,20,30])
@@ -633,5 +796,42 @@
 ; --> cabeza(crear-lista(0, [1,2]))
 ; Esperado: 0
 
-; ============================================================================
+
+; =============== Pruebas -> Diccionarios ==================
+
+; 1) Literal de diccionario y acceso a clave
+; --> ref-diccionario({nombre: "Juan", edad: 25}, "edad")
+; Esperado: 25
+
+; 2) Crear diccionario y setear un valor
+; --> begin
+;      var d = crear-diccionario();
+;      set-diccionario(d, "x", 42);
+;      ref-diccionario(d, "x")
+;    end
+; Esperado: 42
+
+; 3) Modificar valor existente
+; --> begin
+;      var d = {a: 1};
+;      set-diccionario(d, "a", 99);
+;      ref-diccionario(d, "a")
+;    end
+; Esperado: 99
+
+; 4) Obtener claves de diccionario
+; --> cabeza(claves({a: 1, b: 2}))
+; Esperado: "a"  (el primer valor en el orden de inserción)
+
+; 5) Mutabilidad compartida en diccionarios
+; --> begin
+;      var d1 = {k: 1};
+;      var d2 = d1;  
+;      set-diccionario(d1, "k", 7);
+;      ref-diccionario(d2, "k")
+;    end
+; Esperado: 7   
+
+; =====================================================================
+
 
