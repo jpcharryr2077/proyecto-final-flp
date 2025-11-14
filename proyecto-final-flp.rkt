@@ -50,8 +50,6 @@
     (expression (string)   const-str-exp)
     (expression ("true")  true-exp)
     (expression ("false") false-exp)
-
-
     (expression ("null")   const-null-exp)
 
     ; Variables y asignación 
@@ -61,8 +59,10 @@
     ; Funciones 
     (expression ("func" "(" (separated-list identifier ",") ")" "{" expression "}") func-exp)
 
-    ; IDENT o APLICACIÓN 
-    (expression (identifier (arbno "(" (separated-list expression ",") ")")) app-or-var-exp)
+    ; IDENT: aplicación, propiedad o variable (en ese orden de prioridad)
+    (expression (identifier "(" (separated-list expression ",") ")") app-exp)
+    (expression (identifier "." identifier maybe-assign) prop-exp)
+    (expression (identifier) var-exp)
 
     ; Operaciones binarias 
     (expression ("(" expression primitive-bin expression ")") primapp-bin-exp)
@@ -96,6 +96,16 @@
     (expression ("claves" "(" expression ")") claves-exp)
     (expression ("valores" "(" expression ")") valores-exp)
 
+    ; Objetos / Prototipos
+    (expression ("prototipo" identifier "=" "{" (separated-list dict-entry ",") "}") 
+                prototipo-decl-exp)
+    (expression ("clone" "(" expression ")") clone-exp)
+    (expression ("this") this-exp)
+
+    ; Helper para asignación opcional en propiedades
+    (maybe-assign ("=" expression) assign-prop)
+    (maybe-assign () no-assign)
+
     ; Control avanzado (print, while, for, switch)
     (expression ("print" "(" expression ")") print-exp)
     (expression ("while" expression "do" expression "done") while-exp)
@@ -107,7 +117,6 @@
             "default" ":" (arbno expression ";")
         "}")
         switch-exp)
-
 
     ; Primitivas binarias
     (primitive-bin ("+")      primitiva-suma)
@@ -122,7 +131,6 @@
     (primitive-bin ("<=")     primitiva-menor-igual)
     (primitive-bin (">=")     primitiva-mayor-igual)
     (primitive-bin ("==")     primitiva-igual)
-
 
     ; Primitivas unarias
     (primitive-unaria ("longitud") primitiva-longitud)
@@ -148,7 +156,9 @@
   (null-val)
   (proc-val (value procval?))
   (list-val (ref integer?))  
-    (dict-val (ref integer?)))   
+  (dict-val (ref integer?))
+  (obj-val  (ref integer?)))
+
 
 
 (define-datatype procval procval?
@@ -392,6 +402,48 @@
                    [v (cdr pair)])
               (loop (+ i 1) (cons v acc))))))))
 
+; ===== Helpers de objetos =====
+
+
+(define obj-lookup
+  (lambda (obj-ref prop-key)
+    (let* ([obj-struct (deref obj-ref)]
+           [parent-ref (car obj-struct)]
+           [props-vec (cdr obj-struct)])
+      (let loop ([i 0] [n (vector-length props-vec)])
+        (if (>= i n)
+            (if parent-ref
+                (obj-lookup parent-ref prop-key)
+                (eopl:error 'obj-lookup "Propiedad no existe: ~s" prop-key))
+            (let* ([pair (vector-ref props-vec i)]
+                   [k (car pair)])
+              (if (string=? k prop-key)
+                  (cdr pair)  ; Retornar valor
+                  (loop (+ i 1) n))))))))
+
+(define obj-set-key!
+  (lambda (obj-ref prop-key val)
+    (let* ([obj-struct (deref obj-ref)]
+           [parent-ref (car obj-struct)]
+           [props-vec (cdr obj-struct)])
+      (let loop ([i 0] [n (vector-length props-vec)])
+        (if (>= i n)
+            (let* ([new-vec (make-vector (+ n 1))])
+              (let copy-loop ([j 0])
+                (when (< j n)
+                  (vector-set! new-vec j (vector-ref props-vec j))
+                  (copy-loop (+ j 1))))
+              (vector-set! new-vec n (cons prop-key val))
+              (setref! obj-ref (cons parent-ref new-vec))
+              val)
+            (let* ([pair (vector-ref props-vec i)]
+                   [k (car pair)])
+              (if (string=? k prop-key)
+                  (begin
+                    (vector-set! props-vec i (cons k val))
+                    val)
+                  (loop (+ i 1) n))))))))
+
 
 ; =============================================
 ; Evaluador 
@@ -415,25 +467,31 @@
 
       (const-null-exp ()      (cons (null-val) env))
 
-      ; Var o Aplicación
-      (app-or-var-exp (rator rands-nested)
-        (if (null? rands-nested)
-            (let ([binding (apply-env env rator)])
-              (if (reference? binding)
-                  (cons (deref binding) env)
-                  (cons binding env)))
-            (let* ([proc-env (eval-expression (app-or-var-exp rator '()) env)]
-                   [p        (car proc-env)]
-                   [cur-env  (cdr proc-env)])
-              (let loop ([val p] [calls rands-nested] [e cur-env])
-                (if (null? calls)
-                    (cons val e)
-                    (cases expval val
-                      (proc-val (closure-val)
-                        (let* ([args   (eval-rands (car calls) e)]
-                               [result (apply-procedure closure-val args)])
-                          (loop result (cdr calls) e)))
-                      (else (eopl:error 'app-or-var-exp "Not a procedure: ~s" val))))))))
+      ; variable sola
+      (var-exp (id)
+        (let ([binding (apply-env env id)])
+          (if (reference? binding)
+              (cons (deref binding) env)
+              (cons binding env))))
+
+      ; aplicación de función f(a,b,c)
+      (app-exp (id args)
+        (let* ([binding (apply-env env id)])
+          (if (reference? binding)
+              (let ([proc-val (deref binding)])
+                (unless (proc-val? proc-val)
+                  (eopl:error 'app-exp "Identificador no es función: ~s" id))
+                (let ([argvals (eval-rands args env)])
+                  (cons
+                  (apply-procedure proc-val argvals)
+                  env)))
+              (let ([proc-val binding])
+                (unless (proc-val? proc-val)
+                  (eopl:error 'app-exp "Identificador no es función: ~s" id))
+                (let ([argvals (eval-rands args env)])
+                  (cons
+                  (apply-procedure proc-val argvals)
+                  env))))))
 
       
       ; Declaración y Asignación
@@ -713,6 +771,68 @@
               (cons (make-list-expval-from-elements (dict-values->list dv)) e1)
               (eopl:error 'valores "No es diccionario: ~s" dv))))
 
+      ; Crear prototipo
+      (prototipo-decl-exp (id entries)
+        (let loop ([es entries] [e env] [acc '()])
+          (if (null? es)
+              ; Crear objeto sin padre (#f) con las propiedades
+              (let* ([props-vec (list->vector (reverse acc))]
+                     [obj-struct (cons #f props-vec)]
+                     [obj-ref (newref obj-struct)]
+                     [obj (obj-val obj-ref)])
+                (cons obj (extend-env (list id) (list obj) e)))
+              ; Evaluar cada entrada del prototipo
+              (cases dict-entry (car es)
+                (dict-entry-pair (prop-id exp)
+                  (let* ([res (eval-expression exp e)]
+                         [v   (car res)]
+                         [e2  (cdr res)]
+                         [k   (symbol->string prop-id)])
+                    (loop (cdr es) e2 (cons (cons k v) acc))))))))
+      
+      ; Clone
+      (clone-exp (parent-exp)
+        (let* ([pres (eval-expression parent-exp env)]
+               [parent-val (car pres)]
+               [env1 (cdr pres)])
+          (if (obj-val? parent-val)
+              (let* ([parent-ref (expval->obj-ref parent-val)]
+                     [new-vec (make-vector 0)]  ; nuevo objeto vacío
+                     [new-struct (cons parent-ref new-vec)]
+                     [new-ref (newref new-struct)])
+                (cons (obj-val new-ref) env1))
+              (eopl:error 'clone "No es un objeto: ~s" parent-val))))
+      
+      ; this
+      (this-exp ()
+        (let ([this-val (apply-env env 'this)])
+          (cons this-val env)))
+
+      (prop-exp (obj-exp prop-id assign)
+        (let* ([er (eval-expression obj-exp env)]
+              [obj (car er)]
+              [env1 (cdr er)])
+          (if (not (obj-val? obj))
+              (eopl:error 'prop "No es objeto: ~s" obj))
+
+          (let ([obj-ref (expval->obj-ref obj)]
+                [key (symbol->string prop-id)])
+
+            (cases maybe-assign assign
+
+              (assign-prop (value-exp)
+                ;; caso: obj.prop = valor
+                (let* ([vr (eval-expression value-exp env1)]
+                      [val (car vr)]
+                      [env2 (cdr vr)])
+                  (obj-set-key! obj-ref key val)
+                  (cons val env2)))
+
+              (no-assign ()
+                ;; caso: obj.prop
+                (cons (obj-lookup obj-ref key) env1))))))
+
+      
      
       ; Operaciones primitivas
       (primapp-bin-exp (exp1 prim exp2)
@@ -873,6 +993,18 @@
       (dict-val (r) r)
       (else (eopl:error 'expval->dict-ref "No es diccionario: ~s" v)))))
 
+(define obj-val?
+  (lambda (v)
+    (cases expval v
+      (obj-val (r) #t)
+      (else #f))))
+
+(define expval->obj-ref
+  (lambda (v)
+    (cases expval v
+      (obj-val (r) r)
+      (else (eopl:error 'expval->obj-ref "No es objeto: ~s" v)))))
+
 (define num-val?  (lambda (v) (cases expval v (num-val  (n) #t) (else #f))))
 (define bool-val? (lambda (v) (cases expval v (bool-val (b) #t) (else #f))))
 (define str-val?  (lambda (v) (cases expval v (str-val  (s) #t) (else #f))))
@@ -911,6 +1043,8 @@
                        (string-append (car p) ": " (expval->string (cdr p))))
                      lst)])
           (string-append "{" (string-join pairs ", ") "}")))
+      
+      (obj-val (ref) "<object>")
       (proc-val (_) "<procedure>"))))
 
 
