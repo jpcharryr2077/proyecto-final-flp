@@ -11,6 +11,23 @@
 ; URL del repositorio: https://github.com/jpcharryr2077/proyecto-final-flp.git
 ;******************************************************************************************
 
+; Utilidades auxiliares
+(define string-join
+  (lambda (strings sep)
+    (if (null? strings)
+        ""
+        (if (null? (cdr strings))
+            (car strings)
+            (string-append (car strings)
+                           sep
+                           (string-join (cdr strings) sep))))))
+
+(define displayln
+  (lambda (x)
+    (display x)
+    (newline)))
+
+
 ; Scanner 
 (define scanner-spec-flowlang
   '((white-sp (whitespace) skip)
@@ -31,7 +48,10 @@
     ; Expresiones básicas
     (expression (number)   const-num-exp)
     (expression (string)   const-str-exp)
-    (expression (boolean)  const-bool-exp)
+    (expression ("true")  true-exp)
+    (expression ("false") false-exp)
+
+
     (expression ("null")   const-null-exp)
 
     ; Variables y asignación 
@@ -66,7 +86,7 @@
     (expression ("lista?" "(" expression ")") lista?-exp)
     (expression ("vacio?" "(" expression ")") vacio?-exp)
 
-     ; Diccionarios
+    ; Diccionarios
     (expression ("{" (separated-list dict-entry ",") "}") dict-lit-exp)
     (dict-entry (identifier ":" expression) dict-entry-pair)
     (expression ("crear-diccionario" "(" ")") dict-create-exp)
@@ -75,6 +95,18 @@
     (expression ("set-diccionario" "(" expression "," expression "," expression ")") set-dict-exp)
     (expression ("claves" "(" expression ")") claves-exp)
     (expression ("valores" "(" expression ")") valores-exp)
+
+    ; Control avanzado (print, while, for, switch)
+    (expression ("print" "(" expression ")") print-exp)
+    (expression ("while" expression "do" expression "done") while-exp)
+    (expression ("for" identifier "in" expression "do" expression "done") for-exp)
+        
+    (expression
+        ("switch" expression "{"
+            (arbno "case" expression ":" (arbno expression ";"))
+            "default" ":" (arbno expression ";")
+        "}")
+        switch-exp)
 
 
     ; Primitivas binarias
@@ -85,6 +117,12 @@
     (primitive-bin ("concat") primitiva-concat)
     (primitive-bin ("and")    primitiva-and)
     (primitive-bin ("or")     primitiva-or)
+    (primitive-bin ("<")      primitiva-menor)
+    (primitive-bin (">")      primitiva-mayor)
+    (primitive-bin ("<=")     primitiva-menor-igual)
+    (primitive-bin (">=")     primitiva-mayor-igual)
+    (primitive-bin ("==")     primitiva-igual)
+
 
     ; Primitivas unarias
     (primitive-unaria ("longitud") primitiva-longitud)
@@ -366,7 +404,15 @@
       ; Constantes
       (const-num-exp  (datum) (cons (num-val datum) env))
       (const-str-exp  (texto) (cons (str-val texto) env))
-      (const-bool-exp (bool)  (cons (bool-val (eq? bool 'true)) env))
+      
+      (true-exp ()
+        (cons (bool-val #t) env))
+
+      (false-exp ()
+        (cons (bool-val #f) env))
+
+
+
       (const-null-exp ()      (cons (null-val) env))
 
       ; Var o Aplicación
@@ -429,11 +475,90 @@
                          [e2 (cdr re)])
                     (loop (cdr xs) e2 rv))))))
 
+      ;Control: while
+      (while-exp (cond-exp body-exp)
+        (let loop ([env1 env])
+           (let* ([cres (eval-expression cond-exp env1)]
+                  [cv   (car cres)]
+                  [env2 (cdr cres)])
+             (if (valor-verdad? cv)
+                 (let* ([bres (eval-expression body-exp env2)]
+                        [env3 (cdr bres)])
+                  (loop env3))
+                (cons (null-val) env2)))))
+
+      ;Control: for-in
+      (for-exp (id list-exp body-exp)
+        (let* ([lres (eval-expression list-exp env)]
+              [lv   (car lres)]
+              [env1 (cdr lres)])
+          (if (list-val? lv)
+              (let* ([ref (expval->list-ref lv)]
+                    [vec (deref ref)]
+                    [n   (vector-length vec)])
+                (let loop ([i 0] [env2 env1])
+                  (if (>= i n)
+                      (cons (null-val) env2)
+                      (let* ([val (vector-ref vec i)]
+                            [env3 (extend-env (list id) (list val) env2)]
+                            [bres (eval-expression body-exp env3)]
+                            [env4 (cdr bres)])
+                        (loop (+ i 1) env4)))))
+              (eopl:error 'for-exp "Se esperaba una lista en for"))))
+
+      ;; ------------------------------------------------------
+      ;; SWITCH
+      ;; ------------------------------------------------------
+      (switch-exp (test-exp case-vals case-bodies default-bodies)
+        (let* ([tres (eval-expression test-exp env)]
+              [tv   (car tres)]
+              [env1 (cdr tres)])
+
+          ;; Ejecutar una secuencia de expresiones (como begin)
+          (define (exec-seq exps env)
+            (if (null? exps)
+                (cons (null-val) env)
+                (let* ([res (eval-expression (car exps) env)]
+                      [v (car res)]
+                      [e (cdr res)])
+                  (exec-seq (cdr exps) e))))
+
+          ;; Recorrer cada case
+          (let loop ([vals case-vals] [bodies case-bodies])
+            (cond
+              ;; Ningún case coincide → ejecutar default
+              [(null? vals)
+              (exec-seq default-bodies env1)]
+
+              [else
+              (let* ([vres (eval-expression (car vals) env1)]
+                      [vv   (car vres)])
+                (if (expval-equal? tv vv)
+                    ;; Case coincide
+                    (exec-seq (car bodies) env1)
+                    ;; Probar siguiente case
+                    (loop (cdr vals) (cdr bodies))))]))))
+
+
+
+
+      
       
       ; Funciones
       (func-exp (ids body)
         (cons (proc-val (closure ids body env)) env))
 
+
+      ; Control: print
+      (print-exp (e)
+        (let* ([res (eval-expression e env)]
+              [v   (car res)]
+              [env1 (cdr res)])
+          (display (expval->string v))
+          (newline)
+          (cons v env1)))
+
+        
       ; Listas
       (list-lit-exp (elems)
         (let loop ([xs elems] [e env] [acc '()])
@@ -662,7 +787,25 @@
       (primitiva-or  ()
         (if (and (bool-val? val1) (bool-val? val2))
             (bool-val (or (expval->bool val1) (expval->bool val2)))
-            (eopl:error 'apply-prim-binaria "or: se requieren booleanos ~s ~s" val1 val2))))))
+            (eopl:error 'apply-prim-binaria "or: se requieren booleanos ~s ~s" val1 val2)))
+      (primitiva-menor ()
+              (if (and (num-val? val1) (num-val? val2))
+                  (bool-val (< (expval->num val1) (expval->num val2)))
+                  (eopl:error 'apply-prim-binaria "<: se requieren números ~s ~s" val1 val2)))
+      (primitiva-mayor ()
+              (if (and (num-val? val1) (num-val? val2))
+                  (bool-val (> (expval->num val1) (expval->num val2)))
+                  (eopl:error 'apply-prim-binaria ">: se requieren números ~s ~s" val1 val2)))
+      (primitiva-menor-igual ()
+              (if (and (num-val? val1) (num-val? val2))
+                  (bool-val (<= (expval->num val1) (expval->num val2)))
+                  (eopl:error 'apply-prim-binaria "<=: se requieren números ~s ~s" val1 val2)))
+      (primitiva-mayor-igual ()
+              (if (and (num-val? val1) (num-val? val2))
+                  (bool-val (>= (expval->num val1) (expval->num val2)))
+                  (eopl:error 'apply-prim-binaria ">=: se requieren números ~s ~s" val1 val2)))
+      (primitiva-igual ()
+              (bool-val (expval-equal? val1 val2))))))
 
 (define apply-primitiva-unaria
   (lambda (prim val)
@@ -733,6 +876,43 @@
 (define num-val?  (lambda (v) (cases expval v (num-val  (n) #t) (else #f))))
 (define bool-val? (lambda (v) (cases expval v (bool-val (b) #t) (else #f))))
 (define str-val?  (lambda (v) (cases expval v (str-val  (s) #t) (else #f))))
+(define null-val? (lambda (v) (cases expval v (null-val () #t) (else #f))))
+
+; Comparación de expvals para switch-case
+(define expval-equal?
+  (lambda (v1 v2)
+    (cond
+      [(and (num-val? v1) (num-val? v2))
+       (= (expval->num v1) (expval->num v2))]
+      [(and (bool-val? v1) (bool-val? v2))
+       (equal? (expval->bool v1) (expval->bool v2))]
+      [(and (str-val? v1) (str-val? v2))
+       (string=? (expval->str v1) (expval->str v2))]
+      [(and (null-val? v1) (null-val? v2)) #t]
+      [else #f])))
+
+(define expval->string
+  (lambda (v)
+    (cases expval v
+      (num-val  (n) (number->string n))
+      (bool-val (b) (if b "true" "false"))
+      (str-val  (s) s)
+      (null-val () "null")
+      (list-val (ref)
+        (let* ([vec (deref ref)]
+               [lst (vector->list vec)]
+               [flat (map expval->string lst)])
+          (string-append "[" (string-join flat ", ") "]")))
+      (dict-val (ref)
+        (let* ([vec (deref ref)]
+               [lst (vector->list vec)]
+               [pairs
+                (map (lambda (p)
+                       (string-append (car p) ": " (expval->string (cdr p))))
+                     lst)])
+          (string-append "{" (string-join pairs ", ") "}")))
+      (proc-val (_) "<procedure>"))))
+
 
 ; Valor de verdad 
 (define valor-verdad?
@@ -833,5 +1013,6 @@
 ; Esperado: 7   
 
 ; =====================================================================
+
 
 
