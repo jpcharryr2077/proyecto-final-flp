@@ -60,9 +60,23 @@
     (expression ("func" "(" (separated-list identifier ",") ")" "{" expression "}") func-exp)
 
     ; IDENT: aplicación, propiedad o variable (en ese orden de prioridad)
-    (expression (identifier "(" (separated-list expression ",") ")") app-exp)
-    (expression (identifier "." identifier maybe-assign) prop-exp)
-    (expression (identifier) var-exp)
+    (expression (identifier identifier-tail) identifier-exp)
+
+    ; Cola después de un identifier
+    (identifier-tail 
+     ("(" (separated-list expression ",") ")") app-tail)
+    (identifier-tail 
+     ("." identifier method-or-prop) prop-tail)  ; Cambio aquí
+    (identifier-tail 
+     () simple-var-tail)
+
+    (method-or-prop
+     ("(" (separated-list expression ",") ")") method-call-tail)
+    (method-or-prop
+     ("=" expression) assign-prop-tail)
+    (method-or-prop
+     () no-assign-tail)
+
 
     ; Operaciones binarias 
     (expression ("(" expression primitive-bin expression ")") primapp-bin-exp)
@@ -103,8 +117,6 @@
     (expression ("this") this-exp)
 
     ; Helper para asignación opcional en propiedades
-    (maybe-assign ("=" expression) assign-prop)
-    (maybe-assign () no-assign)
 
     ; Control avanzado (print, while, for, switch)
     (expression ("print" "(" expression ")") print-exp)
@@ -467,31 +479,86 @@
 
       (const-null-exp ()      (cons (null-val) env))
 
-      ; variable sola
-      (var-exp (id)
-        (let ([binding (apply-env env id)])
-          (if (reference? binding)
-              (cons (deref binding) env)
-              (cons binding env))))
-
-      ; aplicación de función f(a,b,c)
-      (app-exp (id args)
-        (let* ([binding (apply-env env id)])
-          (if (reference? binding)
-              (let ([proc-val (deref binding)])
-                (unless (proc-val? proc-val)
-                  (eopl:error 'app-exp "Identificador no es función: ~s" id))
-                (let ([argvals (eval-rands args env)])
-                  (cons
-                  (apply-procedure proc-val argvals)
-                  env)))
-              (let ([proc-val binding])
-                (unless (proc-val? proc-val)
-                  (eopl:error 'app-exp "Identificador no es función: ~s" id))
-                (let ([argvals (eval-rands args env)])
-                  (cons
-                  (apply-procedure proc-val argvals)
-                  env))))))
+      ;identifier
+      (identifier-exp (id tail)
+                      (cases identifier-tail tail
+                        (app-tail (args)
+                                  ; Llamada a función: id(args)
+                                  (let ([binding (apply-env env id)])
+                                    (let ([val (if (reference? binding)
+                                                   (deref binding)  ; Si es referencia, obtener el valor
+                                                   binding)])       ; Si no, usar directamente
+      
+                                      ; Verificar si es un proc-val usando cases
+                                      (cases expval val
+                                        (proc-val (closure-val)
+                                                  (let ([argvals (eval-rands args env)])
+                                                    (cons
+                                                     (apply-procedure val argvals)  ; Pasar el proc-val completo
+                                                     env)))
+                                        (else 
+                                         (eopl:error 'app-exp "Identificador no es función: ~s, es ~s" id val))))))
+    
+                        (prop-tail (prop-id morp)
+                                   ; Propiedad de objeto: id.prop, id.prop = valor, o id.prop(args)
+                                   (let ([obj-binding (apply-env env id)])
+                                     (if (reference? obj-binding)
+                                         (let ([obj (deref obj-binding)])
+                                           (if (not (obj-val? obj))
+                                               (eopl:error 'prop "No es objeto: ~s" obj)
+                                               (let ([obj-ref (expval->obj-ref obj)]
+                                                     [key (symbol->string prop-id)])
+                                                 (cases method-or-prop morp
+                                                   (method-call-tail (args)
+                                                                     ; Caso: obj.prop(args) - llamada a método
+                                                                     (let* ([method-val (obj-lookup obj-ref key)]
+                                                                            [argvals (eval-rands args env)])
+                                                                       (cases expval method-val
+                                                                         (proc-val (closure-val)
+                                                                                   (cons (apply-procedure method-val argvals) env))
+                                                                         (else 
+                                                                          (eopl:error 'method-call "No es un método: ~s" method-val)))))
+                                                   (assign-prop-tail (value-exp)
+                                                                     ; Caso: obj.prop = valor
+                                                                     (let* ([vr (eval-expression value-exp env)]
+                                                                            [val (car vr)]
+                                                                            [env2 (cdr vr)])
+                                                                       (obj-set-key! obj-ref key val)
+                                                                       (cons val env2)))
+                                                   (no-assign-tail ()
+                                                                   ; Caso: obj.prop
+                                                                   (cons (obj-lookup obj-ref key) env))))))
+                                         (if (not (obj-val? obj-binding))
+                                             (eopl:error 'prop "No es objeto: ~s" obj-binding)
+                                             (let ([obj-ref (expval->obj-ref obj-binding)]
+                                                   [key (symbol->string prop-id)])
+                                               (cases method-or-prop morp
+                                                 (method-call-tail (args)
+                                                                   ; Caso: obj.prop(args) - llamada a método
+                                                                   (let* ([method-val (obj-lookup obj-ref key)]
+                                                                          [argvals (eval-rands args env)])
+                                                                     (cases expval method-val
+                                                                       (proc-val (closure-val)
+                                                                                 (cons (apply-procedure method-val argvals) env))
+                                                                       (else 
+                                                                        (eopl:error 'method-call "No es un método: ~s" method-val)))))
+                                                 (assign-prop-tail (value-exp)
+                                                                   ; Caso: obj.prop = valor
+                                                                   (let* ([vr (eval-expression value-exp env)]
+                                                                          [val (car vr)]
+                                                                          [env2 (cdr vr)])
+                                                                     (obj-set-key! obj-ref key val)
+                                                                     (cons val env2)))
+                                                 (no-assign-tail ()
+                                                                 ; Caso: obj.prop
+                                                                 (cons (obj-lookup obj-ref key) env))))))))
+    
+                        (simple-var-tail ()
+                                         ; Variable simple: id
+                                         (let ([binding (apply-env env id)])
+                                           (if (reference? binding)
+                                               (cons (deref binding) env)
+                                               (cons binding env))))))
 
       
       ; Declaración y Asignación
@@ -808,32 +875,6 @@
         (let ([this-val (apply-env env 'this)])
           (cons this-val env)))
 
-      (prop-exp (obj-exp prop-id assign)
-        (let* ([er (eval-expression obj-exp env)]
-              [obj (car er)]
-              [env1 (cdr er)])
-          (if (not (obj-val? obj))
-              (eopl:error 'prop "No es objeto: ~s" obj))
-
-          (let ([obj-ref (expval->obj-ref obj)]
-                [key (symbol->string prop-id)])
-
-            (cases maybe-assign assign
-
-              (assign-prop (value-exp)
-                ;; caso: obj.prop = valor
-                (let* ([vr (eval-expression value-exp env1)]
-                      [val (car vr)]
-                      [env2 (cdr vr)])
-                  (obj-set-key! obj-ref key val)
-                  (cons val env2)))
-
-              (no-assign ()
-                ;; caso: obj.prop
-                (cons (obj-lookup obj-ref key) env1))))))
-
-      
-     
       ; Operaciones primitivas
       (primapp-bin-exp (exp1 prim exp2)
         (let* ([e1  (eval-expression exp1 env)]
@@ -864,11 +905,14 @@
 
 ; Aplicar procedimiento 
 (define apply-procedure
-  (lambda (proc args)
-    (cases procval proc
-      (closure (ids body env)
-        (let* ([res (eval-expression body (extend-env ids args env))])
-          (car res))))))
+  (lambda (proc argvals)
+    (cases expval proc
+      (proc-val (closure-val)
+        (cases procval closure-val
+          (closure (ids body env)
+            (let ([new-env (extend-env ids argvals env)])
+              (car (eval-expression body new-env))))))
+      (else (eopl:error 'apply-procedure "No es un procedimiento: ~s" proc)))))
 
 ; =============================================
 ; Primitivas
