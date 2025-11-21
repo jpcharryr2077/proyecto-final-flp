@@ -122,7 +122,7 @@
     (expression ("prototipo" identifier "=" "{" (separated-list dict-entry ",") "}") 
                 prototipo-decl-exp)
     (expression ("clone" "(" expression ")") clone-exp)
-    (expression ("this") this-exp)
+    (expression ("this" identifier-tail) this-exp-tail)
 
     ; Helper para asignación opcional en propiedades
 
@@ -926,10 +926,78 @@
                                      (cons (obj-val new-ref) env1))
                                    (eopl:error 'clone "No es un objeto: ~s" parent-val))))
       
-                  ; this
-                  (this-exp ()
-                            (let ([this-val (apply-env env 'this)])
-                              (cons this-val env)))
+      ; this
+      (this-exp-tail (tail)
+  (let ([this-val (apply-env env 'this)])
+    (cases identifier-tail tail
+      (app-tail (args)
+        ; this(args) - llamar al objeto como función (no común)
+        (eopl:error 'this-exp "No se puede llamar a this como función"))
+      
+      (prop-tail (prop-id morp)
+        ; this.propiedad o this.metodo()
+        (if (reference? this-val)
+            (let ([obj (deref this-val)])
+              (if (not (obj-val? obj))
+                  (eopl:error 'this-exp "No es objeto: ~s" obj)
+                  (let ([obj-ref (expval->obj-ref obj)]
+                        [key (symbol->string prop-id)])
+                    (cases method-or-prop morp
+                      (method-call-tail (args)
+                        ; this.metodo(args)
+                        (let* ([method-val (obj-lookup obj-ref key)]
+                               [argvals (eval-rands args env)])
+                          (cases expval method-val
+                            (proc-val (closure-val)
+                              (cases procval closure-val
+                                (closure (ids body closure-env)
+                                  ; Extender ambiente con 'this' ligado al objeto actual
+                                  (let ([new-env (extend-env (cons 'this ids) 
+                                                             (cons this-val argvals)
+                                                             closure-env)])
+                                    (cons (car (eval-expression body new-env)) env)))))
+                            (else 
+                             (eopl:error 'method-call "No es un método: ~s" method-val)))))
+                      (assign-prop-tail (value-exp)
+                        ; this.propiedad = valor
+                        (let* ([vr (eval-expression value-exp env)]
+                               [val (car vr)]
+                               [env2 (cdr vr)])
+                          (obj-set-key! obj-ref key val)
+                          (cons val env2)))
+                      (no-assign-tail ()
+                        ; this.propiedad
+                        (cons (obj-lookup obj-ref key) env))))))
+            (if (not (obj-val? this-val))
+                (eopl:error 'this-exp "No es objeto: ~s" this-val)
+                (let ([obj-ref (expval->obj-ref this-val)]
+                      [key (symbol->string prop-id)])
+                  (cases method-or-prop morp
+                    (method-call-tail (args)
+                      (let* ([method-val (obj-lookup obj-ref key)]
+                             [argvals (eval-rands args env)])
+                        (cases expval method-val
+                          (proc-val (closure-val)
+                            (cases procval closure-val
+                              (closure (ids body closure-env)
+                                (let ([new-env (extend-env (cons 'this ids)
+                                                           (cons this-val argvals)
+                                                           closure-env)])
+                                  (cons (car (eval-expression body new-env)) env)))))
+                          (else 
+                           (eopl:error 'method-call "No es un método: ~s" method-val)))))
+                    (assign-prop-tail (value-exp)
+                      (let* ([vr (eval-expression value-exp env)]
+                             [val (car vr)]
+                             [env2 (cdr vr)])
+                        (obj-set-key! obj-ref key val)
+                        (cons val env2)))
+                    (no-assign-tail ()
+                      (cons (obj-lookup obj-ref key) env)))))))
+      
+      (simple-var-tail ()
+        ; this (sin nada más) - devolver el objeto mismo
+        (cons this-val env)))))
 
                   ; Operaciones primitivas
                   (primapp-bin-exp (exp1 prim exp2)
