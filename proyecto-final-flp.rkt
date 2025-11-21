@@ -54,6 +54,8 @@
 
     ; Variables y asignación 
     (expression ("var" identifier "=" expression) var-decl-exp)
+
+    
     (expression ("set" identifier set-tail) assign-exp)  ; Unificado
 
     ; Cola después de "set identificador"
@@ -62,6 +64,8 @@
     
     ; Funciones 
     (expression ("func" "(" (separated-list identifier ",") ")" "{" expression "}") func-exp)
+    ; Agrega esto junto con las otras expresiones
+    (expression ("var-rec" identifier "=" "func" "(" (separated-list identifier ",") ")" "{" expression "}") var-rec-exp)
 
     ; IDENT: aplicación, propiedad o variable (en ese orden de prioridad)
     (expression (identifier identifier-tail) identifier-exp)
@@ -82,7 +86,7 @@
      () no-assign-tail)
 
 
-    ; Operaciones binarias 
+    ; Operaciones binarias - CAMBIO: usar expression en lugar de algo más restrictivo
     (expression ("(" expression primitive-bin expression ")") primapp-bin-exp)
 
     ; Operaciones unarias
@@ -196,8 +200,7 @@
    (env  environment?))
   (recursively-extended-env-record
    (proc-names (list-of symbol?))
-   (idss       (list-of (list-of symbol?))
-               )
+   (idss       (list-of (list-of symbol?)))
    (bodies     (list-of expression?))
    (env        environment?)))
 
@@ -224,7 +227,10 @@
       (recursively-extended-env-record (proc-names idss bodies old-env)
                                        (let ((pos (list-find-position sym proc-names)))
                                          (if (number? pos)
-                                             (closure (list-ref idss pos) (list-ref bodies pos) env)
+                                             ; CAMBIO AQUÍ: envolver en proc-val
+                                             (proc-val (closure (list-ref idss pos) 
+                                                                (list-ref bodies pos) 
+                                                                env))
                                              (apply-env old-env sym)))))))
 
 ; Auxiliares de ambiente
@@ -524,7 +530,13 @@
                                                                             [argvals (eval-rands args env)])
                                                                        (cases expval method-val
                                                                          (proc-val (closure-val)
-                                                                                   (cons (apply-procedure method-val argvals) env))
+                                                                                   (cases procval closure-val
+                                                                                     (closure (ids body closure-env)
+                                                                                              ; Extender el ambiente con 'this' ligado al objeto COMO EXPVAL
+                                                                                              (let ([new-env (extend-env (cons 'this ids) 
+                                                                                                                         (cons (obj-val obj-ref) argvals) ; Cambio aquí
+                                                                                                                         closure-env)])
+                                                                                                (cons (car (eval-expression body new-env)) env)))))
                                                                          (else 
                                                                           (eopl:error 'method-call "No es un método: ~s" method-val)))))
                                                    (assign-prop-tail (value-exp)
@@ -542,13 +554,19 @@
                                              (let ([obj-ref (expval->obj-ref obj-binding)]
                                                    [key (symbol->string prop-id)])
                                                (cases method-or-prop morp
+
                                                  (method-call-tail (args)
-                                                                   ; Caso: obj.prop(args) - llamada a método
                                                                    (let* ([method-val (obj-lookup obj-ref key)]
                                                                           [argvals (eval-rands args env)])
                                                                      (cases expval method-val
                                                                        (proc-val (closure-val)
-                                                                                 (cons (apply-procedure method-val argvals) env))
+                                                                                 (cases procval closure-val
+                                                                                   (closure (ids body closure-env)
+                                                                                            ; Pasar obj-binding directamente (ya es expval)
+                                                                                            (let ([new-env (extend-env (cons 'this ids)
+                                                                                                                       (cons obj-binding argvals)
+                                                                                                                       closure-env)])
+                                                                                              (cons (car (eval-expression body new-env)) env)))))
                                                                        (else 
                                                                         (eopl:error 'method-call "No es un método: ~s" method-val)))))
                                                  (assign-prop-tail (value-exp)
@@ -703,6 +721,13 @@
                   ; Funciones
                   (func-exp (ids body)
                             (cons (proc-val (closure ids body env)) env))
+
+      (var-rec-exp (func-name ids body)
+                   (let ([rec-env (extend-env-recursively 
+                                   (list func-name) (list ids) (list body) env)])
+                     (let ([ref (newref (apply-env rec-env func-name))])
+                       (cons (apply-env rec-env func-name)
+                             (extend-env (list func-name) (list ref) rec-env)))))
 
 
                   ; Control: print
@@ -1158,7 +1183,88 @@
 
   (start-flowlang-repl)
 
-  ; ================== Pruebas --> Listas ==================
+; =====================================================================
+;                           PRUEBAS FINALES:
+; =====================================================================
+
+;Variables con diferentes tipos
+;   begin
+;      var x = 10;
+;      var y = "hola";
+;      var z = true;
+;      print(x);  
+;      print(y);  
+;      print(z)
+;   end
+
+;Reasignación de tipo
+;   begin
+;      var a = 42;
+;      print(a);  
+;      set a = "ahora soy texto";
+;      print(a) 
+;   end
+
+;Operaciones Aritméticas
+;begin
+;   var division = (10 / 3);
+;   print(division);
+;   var resultado = (3 * 4);
+;   print(resultado) 
+;end
+
+;Operaciones unarias
+;begin
+;   var num = 5;
+;   print(add1(num));  
+;   print(sub1(num))
+;end
+
+;Operaciones Logicas
+;begin
+;   var a = true;
+;   var b = false;
+;   print((a and b));     
+;   print((a or b)); 
+;   print(not(a))
+;end
+
+;begin
+;   var x = 10;
+;   var y = 5;
+;   print((x > y));       // true
+;   print((x == y));      // false
+;   print((x <= 15))      // true
+;   end
+
+;If
+;begin
+;var funcionIf = func(x) {
+;    if (16 < x) then
+;        print("niño")
+;    else
+;         if (16 < (x + 5)) then
+;              print("adolescente")
+;         else
+;              print("adulto")
+;         end
+;    end};
+;funcionIf(13) 
+;end
+
+;Switch
+;begin
+;    var funcionSwitch = func(x) {
+;        switch x {
+;            case "lunes": print("inicio de semana");
+;            case "martes": print("segundo día");
+;            case "viernes": print("casi fin");
+;            default: print("otro día");}
+;    };
+;    funcionSwitch("lunes") 
+;end
+
+; ================== Pruebas --> Listas ==================
 
   ; 1) cabeza de un literal de lista
   ; --> cabeza([10,20,30])
@@ -1221,8 +1327,35 @@
   ;    end
   ; Esperado: 7   
 
-  ; =====================================================================
+;Funciones
+;begin
+;    var duplicar = func(x) {
+;    (x * 2) };
+;    print(duplicar(7))
+;end
 
+;begin
+;   var cuadrado = func(n) {
+;     (n * n)
+;    };
+;   var resultado = cuadrado(5);
+;   print(resultado)
+;end
 
+;Funciones Recursivas
+;begin
+;  var-rec factorial = func(n) {
+;    if (n <= 1) then 
+;      1 
+;    else 
+;      (n * factorial((n - 1)))
+;    end
+;  };
+;  var cuadrado = func(n) {
+;    (n * n)
+;   };
+;  var resultado = factorial(5);
+;  var resultado2 = cuadrado(resultado);
+;  print(resultado2)
+;end
 
-  
