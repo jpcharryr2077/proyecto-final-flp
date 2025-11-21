@@ -27,7 +27,6 @@
     (display x)
     (newline)))
 
-
 ; Scanner 
 (define scanner-spec-flowlang
   '((white-sp (whitespace) skip)
@@ -119,8 +118,9 @@
     (expression ("valores" "(" expression ")") valores-exp)
 
     ; Objetos / Prototipos
-    (expression ("prototipo" identifier "=" "{" (separated-list dict-entry ",") "}") 
-                prototipo-decl-exp)
+    (expression ("prototipo" identifier "=" expression) 
+            prototipo-decl-exp)
+    
     (expression ("clone" "(" expression ")") clone-exp)
     (expression ("this" identifier-tail) this-exp-tail)
 
@@ -227,7 +227,7 @@
       (recursively-extended-env-record (proc-names idss bodies old-env)
                                        (let ((pos (list-find-position sym proc-names)))
                                          (if (number? pos)
-                                             ; CAMBIO AQUÍ: envolver en proc-val
+
                                              (proc-val (closure (list-ref idss pos) 
                                                                 (list-ref bodies pos) 
                                                                 env))
@@ -435,33 +435,35 @@
 (define obj-lookup
   (lambda (obj-ref prop-key)
     (let* ([obj-struct (deref obj-ref)]
-           [parent-ref (car obj-struct)]
-           [props-vec (cdr obj-struct)])
+           [parent-ref (car obj-struct)]    ; referencia al prototipo padre
+           [props-vec (cdr obj-struct)])    ; propiedades propias
+      ; Primero buscar en las propiedades propias
       (let loop ([i 0] [n (vector-length props-vec)])
         (if (>= i n)
+            ; No encontrado en propiedades propias, buscar en el padre
             (if parent-ref
-                (obj-lookup parent-ref prop-key)
+                (obj-lookup parent-ref prop-key)  ; recursión en el padre
                 (eopl:error 'obj-lookup "Propiedad no existe: ~s" prop-key))
             (let* ([pair (vector-ref props-vec i)]
                    [k (car pair)])
               (if (string=? k prop-key)
-                  (cdr pair)  ; Retornar valor
+                  (cdr pair)  ; Retornar valor encontrado
                   (loop (+ i 1) n))))))))
 
 (define obj-set-key!
   (lambda (obj-ref prop-key val)
     (let* ([obj-struct (deref obj-ref)]
-           [parent-ref (car obj-struct)]
-           [props-vec (cdr obj-struct)])
+           [props-vec (cdr obj-struct)])  ; solo modificar propiedades propias
       (let loop ([i 0] [n (vector-length props-vec)])
         (if (>= i n)
+            ; Propiedad no existe, agregarla al objeto actual
             (let* ([new-vec (make-vector (+ n 1))])
               (let copy-loop ([j 0])
                 (when (< j n)
                   (vector-set! new-vec j (vector-ref props-vec j))
                   (copy-loop (+ j 1))))
               (vector-set! new-vec n (cons prop-key val))
-              (setref! obj-ref (cons parent-ref new-vec))
+              (setref! obj-ref (cons (car obj-struct) new-vec))
               val)
             (let* ([pair (vector-ref props-vec i)]
                    [k (car pair)])
@@ -498,18 +500,17 @@
       (identifier-exp (id tail)
                       (cases identifier-tail tail
                         (app-tail (args)
-                                  ; Llamada a función: id(args)
+
                                   (let ([binding (apply-env env id)])
                                     (let ([val (if (reference? binding)
-                                                   (deref binding)  ; Si es referencia, obtener el valor
-                                                   binding)])       ; Si no, usar directamente
+                                                   (deref binding) 
+                                                   binding)])      
       
-                                      ; Verificar si es un proc-val usando cases
                                       (cases expval val
                                         (proc-val (closure-val)
                                                   (let ([argvals (eval-rands args env)])
                                                     (cons
-                                                     (apply-procedure val argvals)  ; Pasar el proc-val completo
+                                                     (apply-procedure val argvals)  
                                                      env)))
                                         (else 
                                          (eopl:error 'app-exp "Identificador no es función: ~s, es ~s" id val))))))
@@ -894,44 +895,43 @@
                                      (cons (make-list-expval-from-elements (dict-values->list dv)) e1)
                                      (eopl:error 'valores "No es diccionario: ~s" dv))))
 
-                  ; Crear prototipo
-                  (prototipo-decl-exp (id entries)
-                                      (let loop ([es entries] [e env] [acc '()])
-                                        (if (null? es)
-                                            ; Crear objeto sin padre (#f) con las propiedades
-                                            (let* ([props-vec (list->vector (reverse acc))]
-                                                   [obj-struct (cons #f props-vec)]
+                  
+      (prototipo-decl-exp (id init-exp)
+                          (let* ([init-res (eval-expression init-exp env)]
+                                 [init-val (car init-res)]
+                                 [env1 (cdr init-res)])
+                            (if (obj-val? init-val)
+                                (let ([ref (newref init-val)])
+                                  (cons init-val (extend-env (list id) (list ref) env1)))
+                                (cases expval init-val
+                                  (dict-val (dict-ref)
+                                            (let* ([dict-vec (deref dict-ref)]
+                                                   [props-list (vector->list dict-vec)]
+                                                   [obj-struct (cons #f (list->vector props-list))] 
                                                    [obj-ref (newref obj-struct)]
                                                    [obj (obj-val obj-ref)])
-                                              (cons obj (extend-env (list id) (list obj) e)))
-                                            ; Evaluar cada entrada del prototipo
-                                            (cases dict-entry (car es)
-                                              (dict-entry-pair (prop-id exp)
-                                                               (let* ([res (eval-expression exp e)]
-                                                                      [v   (car res)]
-                                                                      [e2  (cdr res)]
-                                                                      [k   (symbol->string prop-id)])
-                                                                 (loop (cdr es) e2 (cons (cons k v) acc))))))))
+                                              (let ([ref (newref obj)])  
+                                                (cons obj (extend-env (list id) (list ref) env1)))))
+                                  (else (eopl:error 'prototipo-decl-exp "Se esperaba un objeto o diccionario: ~s" init-val))))))
       
                   ; Clone
-                  (clone-exp (parent-exp)
-                             (let* ([pres (eval-expression parent-exp env)]
-                                    [parent-val (car pres)]
-                                    [env1 (cdr pres)])
-                               (if (obj-val? parent-val)
-                                   (let* ([parent-ref (expval->obj-ref parent-val)]
-                                          [new-vec (make-vector 0)]  ; nuevo objeto vacío
-                                          [new-struct (cons parent-ref new-vec)]
-                                          [new-ref (newref new-struct)])
-                                     (cons (obj-val new-ref) env1))
-                                   (eopl:error 'clone "No es un objeto: ~s" parent-val))))
+      (clone-exp (parent-exp)
+                 (let* ([pres (eval-expression parent-exp env)]
+                        [parent-val (car pres)]
+                        [env1 (cdr pres)])
+                   (if (obj-val? parent-val)
+                       (let* ([parent-ref (expval->obj-ref parent-val)]
+                              [new-vec (make-vector 0)]  
+                              [new-struct (cons parent-ref new-vec)]  
+                              [new-ref (newref new-struct)])
+                         (cons (obj-val new-ref) env1))
+                       (eopl:error 'clone "No es un objeto: ~s" parent-val))))
       
       ; this
       (this-exp-tail (tail)
   (let ([this-val (apply-env env 'this)])
     (cases identifier-tail tail
       (app-tail (args)
-        ; this(args) - llamar al objeto como función (no común)
         (eopl:error 'this-exp "No se puede llamar a this como función"))
       
       (prop-tail (prop-id morp)
@@ -996,8 +996,7 @@
                       (cons (obj-lookup obj-ref key) env)))))))
       
       (simple-var-tail ()
-        ; this (sin nada más) - devolver el objeto mismo
-        (cons this-val env)))))
+                       (cons this-val env)))))
 
                   ; Operaciones primitivas
                   (primapp-bin-exp (exp1 prim exp2)
@@ -1427,3 +1426,56 @@
 ;  print(resultado2)
 ;end
 
+;Prototipos:
+;begin
+;  prototipo animal = {
+;    sonido: "grrr", 
+;    hablar: func() { 
+;      print(this.sonido)  
+;    },
+;    presentarse: func() {
+;      print(("Hago " concat this.sonido))
+;    }
+;  };
+;  var perro = clone(animal);
+;  set perro.sonido = "guau";
+;  perro.hablar();      
+;  perro.presentarse()  
+;end
+
+;begin
+;  prototipo calculadora = {
+;    sumar: func(a, b) { (a + b) },
+;    multiplicar: func(a, b) { (a * b) }
+;  };
+;  var calc = clone(calculadora);
+;  print(calc.sumar(5, 3));
+;  print(calc.multiplicar(4, 2))
+;end
+
+;begin
+;  prototipo abuelo = { nivel: "abuelo" };
+;  prototipo padre = clone(abuelo);
+;  set padre.nivel = "padre";
+;  prototipo hijo = clone(padre);
+;  set hijo.nivel = "hijo";
+;  print(hijo.nivel)  
+;end
+
+;Prototipos y herencia
+;begin
+;  prototipo vehiculo = {
+;    encender: func() { print("Vehículo encendido") },
+;    mover: func() { print("El vehículo se mueve") }
+;  };
+;  
+;  prototipo carro = clone(vehiculo);
+;  set carro.modelo = "Sedán";
+;  set carro.encender = func() {
+;    print(("Encendiendo carro modelo " concat this.modelo))
+;  };
+;  
+;  vehiculo.encender(); 
+;  carro.encender();
+;  carro.mover() 
+;end
